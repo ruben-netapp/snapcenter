@@ -1,0 +1,75 @@
+---
+# ===================================================================
+# Variables para la Instalación de SnapCenter
+# ===================================================================
+
+# Ruta local del binario de instalación de SnapCenter.
+# Este archivo debe estar en el directorio 'files/'.
+snapcenter_installer_binary: "snapcenter-linux-server.el9.bin"
+
+# Ruta temporal en el servidor de destino donde se copiará el instalador.
+snapcenter_remote_tmp_path: "/tmp/{{ snapcenter_installer_binary }}"
+
+# --- Parámetros solicitados por el instalador ---
+
+# Usuario que ejecutará los servicios de SnapCenter.
+snapcenter_install_user: "root"
+
+# Puerto externo para la interfaz web de SnapCenter.
+snapcenter_webapp_port: 8146
+
+# Directorio base de la instalación (p.ej., /opt resultará en /opt/NetApp/snapcenter).
+snapcenter_install_dir: "/opt"
+
+# --- Parámetros de idempotencia ---
+# El playbook no intentará instalar si este archivo ya existe en el destino.
+snapcenter_install_marker: "/opt/NetApp/snapcenter/snapcenter_server.properties"
+
+# ===================================================================
+# Variables para la instalación del plugin de SnapCenter en Linux
+# ===================================================================
+
+# Usuario con privilegios para la instalación en el host destino
+ansible_user: root
+ansible_become: yes
+
+# --- Configuración de Paquetes Locales ---
+# Ruta en la máquina de Ansible donde se encuentran los RPMs de Java 11
+local_java_rpms_path: "/root/ansible_snapcenter/files/rpms/java" 
+
+# Directorio temporal en el host destino para subir y instalar los RPMs de Java
+remote_tmp_java_dir: "/tmp/java_rpms"
+
+# --- Variables de SnapCenter ---
+
+# IP o FQDN del servidor de SnapCenter
+snapcenter_server_ip: "rhel2.demo.netapp.com"
+
+# Puerto HTTPS del servidor de SnapCenter
+snapcenter_server_port: "8146"
+
+# Puerto que utilizará el plugin en el host Linux (SPL_PORT)
+snapcenter_plugin_port: "8145"
+
+# Usuario que ejecutará el servicio del plugin en el host Linux
+# Si no se especifica, normalmente se usa 'root' o el usuario que realiza la instalación.
+# Revisa la documentación de NetApp si necesitas un usuario específico.
+snapcenter_plugin_user: "root"
+
+# Directorio de instalación personalizado en el host Linux
+# Si se deja vacío, se usará la ruta por defecto.
+snapcenter_install_dir: "/opt/NetApp/snapcenter"
+
+# Plugins a habilitar (SCO para Oracle, SCU para SAP HANA, etc.)
+snapcenter_enabled_plugins: "SCO,SPL"
+
+# --- Variables de los ficheros de instalación ---
+
+# Ruta en tu máquina local (o servidor de Ansible) donde se encuentran los ficheros de instalación
+local_install_files_path: "/root/ansible_snapcenter/files"
+
+# Nombres de los ficheros de instalación
+snapcenter_plugin_binary: "snapcenter_linux_host_plugin.bin"
+
+# Directorio temporal en el host destino para subir los ficheros de instalación
+remote_tmp_dir: "/tmp/snapcenter_install"

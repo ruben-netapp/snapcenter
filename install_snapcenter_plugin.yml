@@ -1,0 +1,100 @@
+---
+- name: Instalar y configurar el plugin de SnapCenter para Linux
+  hosts: oracle
+  vars_files:
+    - vars/snapcenter_vars.yml
+
+  pre_tasks:
+    - name: 1a. Crear directorio temporal para los RPMs de Java en el host destino
+      ansible.builtin.file:
+        path: "{{ remote_tmp_java_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: 1b. Copiar los RPMs de Java al host destino
+      ansible.builtin.copy:
+        src: "{{ local_java_rpms_path }}/"
+        dest: "{{ remote_tmp_java_dir }}/"
+        mode: '0644'
+
+    - name: 1c. Instalar Java 11 desde los RPMs locales
+      ansible.builtin.dnf:
+        name: "{{ remote_tmp_java_dir }}/java-11-openjdk-headless-11.0.25.0.9-7.el9.x86_64.rpm"
+        state: present
+        disable_gpg_check: yes
+
+    - name: 1d. Establecer Java 11 como la versión por defecto del sistema
+      ansible.builtin.shell:
+        cmd: "alternatives --set java java-11-openjdk.x86_64"
+      register: alternatives_result
+      changed_when: "'is now a slave of' in alternatives_result.stdout"
+
+  tasks:
+    - name: 2. Crear directorio temporal para la instalación de SnapCenter
+      ansible.builtin.file:
+        path: "{{ remote_tmp_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: 3. Copiar el fichero binario de instalación al host destino
+      ansible.builtin.copy:
+        src: "{{ local_install_files_path }}/{{ snapcenter_plugin_binary }}"
+        dest: "{{ remote_tmp_dir }}/{{ snapcenter_plugin_binary }}"
+        mode: '0755'
+
+    # --- NUEVA TAREA DE COMPROBACIÓN ---
+    - name: 3a. Verificar si el plugin de SnapCenter ya está instalado
+      ansible.builtin.stat:
+        path: "{{ snapcenter_install_dir }}"
+      register: snapcenter_install_stat
+
+    # --- TAREA DE INSTALACIÓN AHORA ES CONDICIONAL ---
+    - name: 4. Ejecutar la instalación del plugin en modo silencioso (si no está instalado)
+      ansible.builtin.command: >
+        ./{{ snapcenter_plugin_binary }} -i silent
+        -DPORT={{ snapcenter_plugin_port }}
+        -DSERVER_IP={{ snapcenter_server_ip }}
+        -DSERVER_HTTPS_PORT={{ snapcenter_server_port }}
+        -DUSER_INSTALL_DIR={{ snapcenter_install_dir }}
+      args:
+        chdir: "{{ remote_tmp_dir }}"
+      register: installation_result
+      # Esta línea es la clave: solo se ejecuta si el directorio no existe.
+      when: not snapcenter_install_stat.stat.exists
+
+    - name: Mostrar resultado de la instalación
+      ansible.builtin.debug:
+        var: installation_result.stdout_lines
+      # Solo muestra el log si la instalación se ha ejecutado
+      when: installation_result is changed
+
+    - name: 5. Configurar los plugins habilitados en spl.properties
+      ansible.builtin.lineinfile:
+        path: /var/opt/snapcenter/spl/etc/spl.properties
+        regexp: '^SPL_ENABLED_PLUGINS='
+        line: "SPL_ENABLED_PLUGINS={{ snapcenter_enabled_plugins }}"
+        state: present
+        create: yes
+        mode: '0644'
+      notify: Reiniciar SnapCenter Plugin Loader
+
+    - name: 6. Asegurar que el servicio está habilitado y en ejecución
+      ansible.builtin.service:
+        name: spl
+        state: started
+        enabled: yes
+
+  post_tasks:
+    - name: 7. Limpiar los directorios temporales
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ remote_tmp_java_dir }}"
+        - "{{ remote_tmp_dir }}"
+
+  handlers:
+    - name: Reiniciar SnapCenter Plugin Loader
+      ansible.builtin.service:
+        name: spl
+        state: restarted

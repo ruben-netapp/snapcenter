@@ -1,0 +1,118 @@
+---
+- name: Automatizar Instalación de SnapCenter en RHEL 9 (Modo Offline)
+  hosts: snapcenter_servers
+  become: true
+  vars_files:
+    - vars/snapcenter_vars.yml
+
+  tasks:
+    # ===================================================================
+    # Tarea 0: Verificaciones Previas
+    # ===================================================================
+    - name: Fallar si el SO no es Red Hat Enterprise Linux 9
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "RedHat"
+          - ansible_distribution_major_version == "9"
+        fail_msg: "Este playbook está diseñado exclusivamente para RHEL 9."
+        quiet: true
+
+    # ===================================================================
+    # Tarea 1: Preparación del Sistema (Instalación de RPMs locales)
+    # ===================================================================
+    - name: "Bloque de preparación: Instalar dependencias desde archivos locales"
+      block:
+        - name: Crear directorio temporal para los RPMs en el destino
+          ansible.builtin.file:
+            path: /tmp/offline_rpms
+            state: directory
+            mode: '0755'
+
+        - name: Copiar todos los RPMs necesarios al servidor de destino
+          ansible.builtin.copy:
+            src: files/rpms/
+            dest: /tmp/offline_rpms/
+            mode: '0644'
+
+        - name: Encontrar los RPMs copiados en el directorio temporal
+          ansible.builtin.find:
+            paths: /tmp/offline_rpms
+            patterns: '*.rpm'
+          register: found_rpm_files
+
+        - name: Instalar todos los RPMs desde la lista de archivos encontrados
+          ansible.builtin.dnf:
+            name: "{{ found_rpm_files.files | map(attribute='path') | list }}"
+            state: present
+            disable_gpg_check: true
+          when: found_rpm_files.files | length > 0
+
+        - name: Asegurar que el servicio NGINX esté iniciado y habilitado
+          ansible.builtin.service:
+            name: nginx
+            state: started
+            enabled: true
+
+        - name: Abrir puertos para SnapCenter y NGINX en el firewall
+          ansible.posix.firewalld:
+            port: "{{ item }}"
+            permanent: true
+            state: enabled
+            immediate: true
+          loop:
+            - "80/tcp"
+            - "443/tcp"
+            - "{{ snapcenter_webapp_port }}/tcp"
+            - "8145/tcp"
+            - "8147/tcp"
+            - "8154/tcp"
+          when: ansible_facts.services['firewalld.service'] is defined and ansible_facts.services['firewalld.service'].state == 'running'
+
+      rescue:
+        - name: Fallo en la preparación del sistema
+          ansible.builtin.fail:
+            msg: "Una o más tareas de instalación de requisitos fallaron. Revisa los logs."
+
+    # ===================================================================
+    # Tarea 2: Instalación de SnapCenter Server
+    # ===================================================================
+    - name: "Bloque de instalación: Ejecutar el instalador de SnapCenter"
+      block:
+        - name: Verificar si SnapCenter ya está instalado
+          ansible.builtin.stat:
+            path: "{{ snapcenter_install_marker }}"
+          register: snapcenter_marker
+
+        - name: Proceder con la instalación si no se encuentra la marca
+          when: not snapcenter_marker.stat.exists
+          block:
+            - name: Copiar el binario de instalación al servidor de destino
+              ansible.builtin.copy:
+                src: "files/{{ snapcenter_installer_binary }}"
+                dest: "{{ snapcenter_remote_tmp_path }}"
+                mode: '0755'
+
+            - name: Ejecutar el instalador de SnapCenter en modo silencioso
+              ansible.builtin.command:
+                cmd: >
+                  {{ snapcenter_remote_tmp_path }}
+                  -i silent
+                  -p {{ snapcenter_webapp_port }}
+                  -u "{{ snapcenter_install_user }}"
+                  -d "{{ snapcenter_install_dir }}"
+                creates: "{{ snapcenter_install_marker }}"
+              register: snapcenter_install_result
+              changed_when: snapcenter_install_result.rc == 0
+
+            - name: Limpiar el archivo de instalación y los RPMs temporales
+              ansible.builtin.file:
+                path: "{{ item }}"
+                state: absent
+              loop:
+                - "{{ snapcenter_remote_tmp_path }}"
+                - /tmp/offline_rpms
+
+        - name: Informar que la instalación fue omitida
+          ansible.builtin.debug:
+            msg: "El archivo '{{ snapcenter_install_marker }}' ya existe. Se omite la instalación de SnapCenter."
+          when: snapcenter_marker.stat.exists

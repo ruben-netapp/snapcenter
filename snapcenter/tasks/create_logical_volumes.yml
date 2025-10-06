@@ -1,0 +1,44 @@
+---
+- name: Se crea el directorio si no existe para la instalación de SnapCenter
+  ansible.builtin.file:
+    path: "{{ item.value.mount_folder }}"
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  with_dict: "{{ snapcenter_logical_volume }}"
+
+- name: Se crea el volumen lógico necesario para la instalación de SnapCenter
+  community.general.lvol:
+    vg: "{{ item.value.vg }}"
+    lv: "{{ item.key }}"
+    size: "{{ item.value.size }}"
+    state: present
+    force: true
+  with_dict: "{{ snapcenter_logical_volume }}"
+
+- name: Se da formato al dispositivo
+  community.general.filesystem:
+    fstype: "{{ item.value.format }}"
+    dev: "/dev/{{ item.value.vg }}/{{ item.key }}"
+  with_dict: "{{ snapcenter_logical_volume }}"
+
+- name: Se monta el volumen lógico
+  ansible.posix.mount:
+    name: "{{ item.value.mount_folder }}"
+    src: "/dev/mapper/{{ item.value.vg }}-{{ item.key }}"
+    fstype: "{{ item.value.format }}"
+    opts: "{{ item.value.opts }}"
+    state: mounted
+  with_dict: "{{ snapcenter_logical_volume }}"
+
+- name: Se comprueba que se ha montado correctamente
+  ansible.builtin.command: mount -a
+  register: check_mounts
+  changed_when: check_mounts.rc != 0
+  
+- name: Se restaura el contexto de SELinux en el punto de montaje
+  ansible.builtin.command: "restorecon -R {{ item.value.mount_folder }}"
+  register: apply_selinux_fcontext
+  changed_when: apply_selinux_fcontext.rc != 0
+  with_dict: "{{ snapcenter_logical_volume }}"

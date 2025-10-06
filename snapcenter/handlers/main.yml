@@ -1,0 +1,17 @@
+---
+# Handlers para el rol 'snapcenter'.
+- name: Recargar firewalld
+  ansible.builtin.service:
+    name: firewalld
+    state: reloaded
+  listen: Recargar firewalld
+  
+- name: Recargar systemd
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Reiniciar Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: restarted
+    enabled: yes

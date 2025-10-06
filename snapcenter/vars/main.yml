@@ -1,0 +1,58 @@
+# ===================================================================
+# ARCHIVO DE VARIABLES PARA EL ROL DE SNAPCENTER
+#
+# Centraliza toda la configuración necesaria para la instalación.
+# ===================================================================
+
+# -------------------------------------------------------------------
+# Configuración del volumen Logico de Snapcenter
+# -------------------------------------------------------------------
+snapcenter_size: 40G
+snapcenter_logical_volume:
+  lv_snapcenter:
+    name: lv_snapcenter
+    vg: APLIvg00
+    size: "{{ snapcenter_size }}"
+    mount_folder: /opt
+    format: xfs
+    opts: defaults,noatime
+    force: "no"
+    service: "snapcenter"
+# -------------------------------------------------------------------
+# Configuración del usuario de Snapcenter
+# -------------------------------------------------------------------
+group_snapcenter: snapcenter
+user_snapcenter: snapcenter
+snapcenter_home: /opt/NetApp/snapcenter
+# -------------------------------------------------------------------
+# Configuración de la Instalación de SnapCenter
+# -------------------------------------------------------------------
+snapcenter_installer_binary: "snapcenter-linux-server.el9.bin"
+snapcenter_install_user: "snapcenter"
+snapcenter_install_dir: "/opt/NetApp/snapcenter"
+snapcenter_webapp_port: "8146"
+snapcenter_remote_tmp_path: "/opt/{{ snapcenter_installer_binary }}"
+snapcenter_install_marker: "{{ snapcenter_install_dir }}/bin/scs"
+
+# -------------------------------------------------------------------
+# Lista de Dependencias RPM
+# -------------------------------------------------------------------
+snapcenter_required_rpms:
+  - nginx
+  - dotnet-sdk-8.0
+  - packages-microsoft-prod
+  - pam
+  - pam-devel
+  - powershell
+  - net-tools
+  
+snapcenter_nginx_conf: /etc/nginx/conf.d/snapcenter.conf 
+snapcenter_uninstaller_path: "/opt/NetApp/snapcenter/SnapManagerWeb/installation/uninstall"
+snapcenter_base_dir: "/opt/NetApp"
+# -------------------------------------------------------------------
+#  REPOS COMPUTE (BASE)
+# -------------------------------------------------------------------
+rhel_version: "{{ ansible_distribution_version | regex_search('(\\d{1,2}[.]\\d{1,2})') }}"
+compute_repos:
+  - compute-rhel_{{ rhel_version }}_for_x86_64_appstream_eus-rpm-stable-local
+  - compute-rhel_{{ rhel_version }}_for_x86_64_baseos_eus-rpm-stable-local

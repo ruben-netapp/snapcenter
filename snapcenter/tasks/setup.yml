@@ -1,0 +1,111 @@
+---
+# Tareas de preparación: repositorios, paquetes y firewall.
+- name: "Setup | Configurar el repositorio DNF para los RPMs"
+  ansible.builtin.yum_repository:
+    name: artifactory_snapcenter_rpms
+    description: "Repositorio Artifactory para RPMs de SnapCenter"
+    baseurl: "https://{{ artifactory_host }}/artifactory/storage-snapcenter-rpm-stable-local"
+    enabled: true
+    gpgcheck: false
+    state: present
+
+### Se limpia la cache del yum
+- name: "Clean yum cache"
+  ansible.builtin.command: yum clean all
+  register: clean_all
+  changed_when: clean_all.rc != 0
+# ===================================================================
+# INICIO: Workaround para el instalador de SnapCenter
+# ===================================================================
+- name: "Workaround | Poner SELinux en modo Permisivo temporalmente para la instalación"
+  ansible.posix.selinux:
+    policy: targeted
+    state: permissive
+# ===================================================================
+# FIN: Workaround
+# ===================================================================
+
+- name: "Setup | Instalar dependencias RPM requeridas"
+  ansible.builtin.dnf:
+    name: "{{ snapcenter_required_rpms }}"
+    state: present
+    enablerepo: "artifactory_snapcenter_rpms"
+    disablerepo: "*"
+  register: dnf_install_result
+
+### Comprobar estado de los servicios
+- name: Check status of services
+  ansible.builtin.service_facts:
+  no_log: true
+
+- name: "Fix | Comentar todas las líneas 'listen' con IPv6 en nginx.conf"
+  ansible.builtin.replace:
+    path: /etc/nginx/nginx.conf
+    regexp: '^(\s*)(listen\s+\[::\]:.*)$'
+    replace: '\1#\2'
+  register: fix_main_ipv6
+
+- name: "Debug | IPv6 comentado en nginx.conf"
+  ansible.builtin.debug:
+    msg: "Cambios en nginx.conf: {{ fix_main_ipv6.changed }}"
+
+- name: "SELinux | Permitir conexiones de red"
+  ansible.posix.seboolean:
+    name: httpd_can_network_connect
+    state: yes
+    persistent: yes
+
+- name: "SELinux | Restaurar contexto de certificados"
+  ansible.builtin.command: restorecon -Rv /var/opt/snapcenter/certs
+  register: selinux_restore
+  changed_when: "'Relabeled' in selinux_restore.stdout"
+
+- name: "SELinux Prep | Permitir que NGINX escuche en el puerto de la webapp"
+  community.general.seport:
+    ports: "{{ snapcenter_webapp_port }}"
+    proto: tcp
+    setype: http_port_t
+    state: present
+
+- name: "SELinux Prep | Crear directorios para MySQL"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /var/opt/mysqld
+    - "{{ snapcenter_install_dir }}/SnapManagerWeb/Repository/MySQL"
+
+- name: "SELinux Prep | Asignar contexto de SELinux al directorio PID de MySQL"
+  community.general.sefcontext:
+    target: '/var/opt/mysqld(/.*)?'
+    setype: mysqld_var_run_t
+    state: present
+
+- name: "SELinux Prep | Asignar contexto de SELinux al directorio de datos de MySQL"
+  community.general.sefcontext:
+    target: '{{ snapcenter_install_dir }}/SnapManagerWeb/Repository/MySQL(/.*)?'
+    setype: mysqld_db_t
+    state: present
+
+- name: "SELinux Prep | Aplicar los nuevos contextos de SELinux"
+  ansible.builtin.command: "restorecon -R {{ item }}"
+  loop:
+    - /var/opt/mysqld
+    - "{{ snapcenter_install_dir }}/SnapManagerWeb/Repository/MySQL"
+  changed_when: false
+
+#- name: "Setup | Abrir puertos requeridos en el firewall"
+#  ansible.posix.firewalld:
+#    port: "{{ item }}"
+#    permanent: true
+#    state: enabled
+#  loop:
+#    - "80/tcp"
+#    - "443/tcp"
+#    - "{{ snapcenter_webapp_port }}/tcp"
+#    - "8145/tcp"
+#    - "8147/tcp"
+#    - "8154/tcp"
+#  when: "'firewalld' in ansible_facts.services and ansible_facts.services['firewalld']['state'] == 'running'"
+#  notify: Recargar firewalld

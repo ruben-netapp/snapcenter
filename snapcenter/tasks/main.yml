@@ -1,0 +1,71 @@
+---
+# ===================================================================
+# TAREA PRINCIPAL DEL ROL 'snapcenter'
+#
+# Orquesta la ejecución de las diferentes fases de la instalación:
+# 1. Verificaciones previas (preflight).
+# 2. Instalación (setup, install) solo si no está ya instalado.
+# 3. Limpieza (cleanup) se ejecuta siempre.
+# ===================================================================
+# - name: "Levantar Nginx"
+  # ansible.builtin.import_tasks: fix_nginx.yml
+
+ - name: "Fase 1: Ejecutar verificaciones previas (Pre-flight checks)"
+   ansible.builtin.import_tasks: preflight.yml
+ 
+ - name: "Fase 2: Ejecutar bloque de instalación y configuración"
+   when: not snapcenter_marker.stat.exists
+   block:
+     - name: "Preparación del sistema"
+       block:
+         - name: "Asegurar que el volumen lógico para SnapCenter existe"
+           ansible.builtin.import_tasks: create_logical_volumes.yml
+         
+         - name: "Asegurar que el usuario SnapCenter existe"
+           ansible.builtin.import_tasks: setup_user.yml
+         
+         - name: "Desinstalar SnapCenter"
+           ansible.builtin.import_tasks: uninstall_snapcenter.yml
+ 
+         - name: Importar tareas de preparación (setup)
+           ansible.builtin.import_tasks: setup.yml
+       rescue:
+         - name: "Error | Fallo Crítico durante la preparación del sistema"
+           ansible.builtin.fail:
+             msg: |
+               La instalación de dependencias RPM falló.
+               STDOUT: {{ dnf_install_result.stdout | default('No stdout disponible') }}
+               STDERR: {{ dnf_install_result.stderr | default('No stderr disponible') }}
+ 
+     - name: "Instalación de SnapCenter"
+       block:
+         - name: Importar tareas de instalación (install)
+           ansible.builtin.import_tasks: install.yml
+       rescue:
+ 
+         - name: "Error | Fallo Crítico durante la instalación de SnapCenter"
+           ansible.builtin.fail:
+             msg: |
+               La ejecución del instalador de SnapCenter falló.
+               STDOUT: {{ install_result.stdout | default('No stdout disponible') }}
+               STDERR: {{ install_result.stderr | default('No stderr disponible') }}
+       always:
+         - name: "Cleanup | Restaurar SELinux a modo Enforcing"
+           ansible.posix.selinux:
+             policy: targeted
+             state: enforcing
+           ignore_errors: true
+  
+         - name: "Cleanup | Restaurar contextos de seguridad de SELinux en la instalación"
+           ansible.builtin.command: "restorecon -R {{ snapcenter_install_dir }}"
+           changed_when: false
+ 
+         - name: "Ejecutar limpieza final"
+           ansible.builtin.import_tasks: cleanup.yml
+  
+ 
+ - name: "Info | La instalación fue omitida"
+   ansible.builtin.debug:
+     msg: "El marcador '{{ snapcenter_install_marker }}' ya existe. No se realizaron cambios."
+   when: snapcenter_marker.stat.exists
+ 

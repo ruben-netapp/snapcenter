@@ -1,0 +1,433 @@
+---
+- name: "1. Crear el directorio de instalación si no existe (para el script)"
+  ansible.builtin.file:
+    path: "{{ snapcenter_uninstaller_path | dirname }}"
+    state: directory
+    mode: '0755'
+
+- name: "2. Asegurar que el script de desinstalación exista"
+  ansible.builtin.copy:
+    dest: "{{ snapcenter_uninstaller_path }}"
+    mode: '0755' # Dar permisos de ejecución
+    # --- INICIO DE LA CORRECCIÓN DE SINTAXIS ---
+    content: |
+      {% raw %}
+      #!/bin/bash
+      ########################################################################
+      ###        Copyright NetApp 2024, All rights reserved            ###
+      ###               Uninstallation script for LINUX                ###
+      ########################################################################
+      ####################################################################
+      ###                       LOGGING METHODS                        ###
+      ####################################################################
+      LOG_NAME="SnapCenter_LINUX_Server_Uninstall_"`date +%m_%d_%Y_%H_%M_%S`".log"
+      INPUT_FORMAT_DINSTALL_LOG_NAME="-DINSTALL_LOG_NAME="
+      for userinput in "$@"
+      do
+              if [[ $userinput == "$INPUT_FORMAT_DINSTALL_LOG_NAME"* ]]; then
+                              LOG_NAME=${userinput#$INPUT_FORMAT_DINSTALL_LOG_NAME}
+              fi
+      done
+      UNINSTALL_LOG_PATH="/var/opt/snapcenter/logs/"$LOG_NAME
+      mkdir -p $(dirname $UNINSTALL_LOG_PATH)
+      exec 3>&1 4>&2
+      trap 'exec 2>&4 1>&3' 0 1 2 3
+      exec 1>$UNINSTALL_LOG_PATH 2>&1
+      #Everything below will go to the log file.
+      function logit {
+              local log_time=`date`
+              echo "[${USER}][$log_time] - ${*}"
+              echo "[${USER}][$log_time] - ${*}" >&3
+      }
+      function logitwarn {
+              local log_time=`date`
+              echo "[${USER}][$log_time] - [WARN] ${*}"
+              echo "[${USER}][$log_time] - [WARN] ${*}" >&3
+      }
+      function logiterr {
+              local log_time=`date`
+              echo "[${USER}][$log_time] - [ERROR] ${*}"
+              echo "[${USER}][$log_time] - [ERROR] ${*}" >&3
+      }
+      #variable declaration
+      GREP=grep
+      AWK=awk
+      PS_COMMAND="/bin/ps -ef"
+      USER_INSTALL_DIR=""
+      webappRPMName="netapp-snapmanagerweb"
+      smcoreRPMName="netapp-smcore"
+      schedulerRPMName="netapp-scheduler"
+      snapgathersRPMName="netapp-snapgathers"
+      SMCORE_APP_NAME="SnapCenter SMCore Service"
+      SNAPMANAGER_WEBAPP_NAME="SnapCenter Web Application"
+      SCHEDULER_APP_NAME="Snapcenter Scheduler Service"
+      SCHEDULER_COMMAND="scheduler"
+      SMCORE_COMMAND="smcore"
+      SNAPMANAGERWEB_COMMAND="snapmanagerweb"
+      DOTNET=$(which dotnet)
+      PWSH=$(which pwsh)
+      IPADDR=`ip addr show dev eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1`
+      systemctl > /dev/null 2>&1
+      if [ $? -ne 0 ]; then
+              SYSTEM_CTL=0
+      else
+              SYSTEM_CTL=1
+      fi
+      ####################################################################
+      ####################################################################
+      ###                       ERROR HANDLING                        ###
+      ####################################################################
+      function Executing {
+              local fn_name=$1
+              local line_num=$2
+              local result_value=$3
+              local failure="err" #default value
+              #Get the actual command execution line.
+              line_num=$((line_num-1))
+              #Handle the positive case (no error)
+              logit ""
+              if [ "$result_value" -eq "0" ]; then
+                      logit "Executing: Function Name: $fn_name, Line No: $line_num"
+                      logit "Executing: Executed successfully. Result = $result_value"
+                      logit ""
+                      return 0
+              fi
+              #Check is only warning message enough
+              if [ "$#" -eq "4" ]; then
+                      failure=$4
+              fi
+              #Consolidate & throw the error
+              if [ "$failure" == "warn" ]; then
+                      logitwarn "Executing: Function Name: $fn_name, Line No: $line_num, Result: $result_value"
+                      logitwarn "Executing: Particular execution was failed and continuing with the further execution process..."
+                      logit ""
+                      return 0
+              else
+                      logiterr "Executing: Function Name: $fn_name, Line No: $line_num"
+              logiterr "Executing: Execution was failed. Final error code = $result_value"
+                      logiterr "Executing: Abort the installer."
+                      logit ""
+                      logit "*************************************************"
+                      logit "**  FAILURE: Error occured in the installation **"
+                      logit "*************************************************"
+                      logit ""
+                      exit $result_value
+              fi
+      }
+      # Manual readlink implementation.
+      function readlinkf() {
+          [ "${1:-}" ] || return 1
+              if command -v readlink >/dev/null 2>&1; then
+              # Check if readlink supports the -f option
+              if readlink -f "$1" >/dev/null 2>&1; then
+                  readlink -f "$1"
+                  return 0
+              fi
+          fi
+          maxAllowedSymlinks=40
+          CDPATH=''
+          result=$1
+          [ -e "${result%/}" ] || result=${1%"${1##*[!/]}"}
+          [ -d "${result:-/}" ] && result="$result/"
+          cd -P . 2>/dev/null || return 1
+          while [ "$maxAllowedSymlinks" -ge 0 ] && maxAllowedSymlinks=$((maxAllowedSymlinks - 1)); do
+              if [ ! "$result" = "${result%/*}" ]; then
+                  case $result in
+                  /*) cd -P "${result%/*}/" 2>/dev/null || break ;;
+                  *) cd -P "./${result%/*}" 2>/dev/null || break ;;
+                  esac
+                  result=${result##*/}
+              fi
+              if [ ! -L "$result" ]; then
+                  result="${PWD%/}${result:+/}${result}"
+                  printf '%s\n' "${result:-/}"
+                  return 0
+              fi
+              path=$(ls -dl -- "$result" 2>/dev/null) || break
+              result=${path#*" $result -> "}
+          done
+          return 1
+      }
+      ####################################################################
+      #Construct the mandatory values such as version, mode of operation etc...
+      #Prior to begin any work flow.
+      function constructMandatoryValues () {
+              #Get the installer version
+              VERSION=`rpm -qa --queryformat "%{VERSION}.%{RELEASE}" netapp-smcore`
+              #Mode of operation - Determine is Uninstall or not
+              MODE_OPRN="UNDEFINED" #Assume as fresh install
+              local smcore_installed=`rpm -qa | grep netapp-smcore`
+              if [ ! -z "$smcore_installed" ]
+              then
+                      MODE_OPRN="UNINSTALL"
+              fi
+              #Get Host FQDN Name
+              CN_FQDN=`hostname`
+              Executing ${FUNCNAME[0]} $LINENO $? warn
+              #Get the installtion directory
+              INSTALLER_RUNTIME_DIR="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+              USER_INSTALL_DIR=`dirname $(dirname $(dirname $(dirname $(rpm -ql "$smcore_installed" | grep "/SMCoreServiceHost.dll" | head -n 1))))`
+              INSTALL_DIR=$(dirname $(rpm -ql $smcore_installed | head -n1))
+              DATA_DIR="/var/opt/snapcenter"
+              SNAPMANAGERWEB_DIR=$INSTALL_DIR/SnapManagerWeb
+              SMCORE_DIR=$INSTALL_DIR/SMCore
+              SCHEDULER_DIR=$INSTALL_DIR/Scheduler
+              logit ""
+              logit "constructMandatoryValues: Construct the mandatory values to perform removal work flow"
+              logit "constructMandatoryValues: Product Version    = $VERSION"
+              logit "constructMandatoryValues: Mode of Operation  = $MODE_OPRN"
+              logit "constructMandatoryValues: Hostname (FQDN)    = $CN_FQDN"
+              logit "constructMandatoryValues: Install Directory  = $INSTALL_DIR"
+              logit "constructMandatoryValues: Installer PID      = $$"
+              logit "constructMandatoryValues: Installer Exec Dir = $INSTALLER_RUNTIME_DIR"
+              logit "constructMandatoryValues: Data Directory     = $DATA_DIR"
+              logit "constructMandatoryValues: Uninstall log path = $UNINSTALL_LOG_PATH"
+              logit "constructMandatoryValues: Completed the construction of mandatory values."
+              logit ""
+      }
+      function parseArguments()
+      {
+              INTERACTIVE_MODE=1
+              INTERACTIVE_FLAG=0
+              INTERACTIVE_SILENT=0
+              for userinput in "$@"
+              do
+              if [[ $userinput == "-i"* ]]; then
+                  INTERACTIVE_FLAG=1
+              elif [[ $userinput == "silent"* ]]; then
+                  INTERACTIVE_SILENT=1
+              fi
+              if [ $INTERACTIVE_SILENT -eq 1 ] && [ $INTERACTIVE_FLAG -eq 1 ]; then
+                  INTERACTIVE_MODE=0
+                  break
+              fi
+              done
+              CONFIRM=0
+              # Input Format
+              local INPUT_FORMAT_DCONFIRM="-DCONFIRM="
+              if [[ $INTERACTIVE_MODE -eq 1 ]]; then
+                      #Parsing the input values given by the user in interactive mode and storing it in a variable.
+                      logit ""
+                      logit "parseArguments: Begin the parsing of user provided arguments(interactive)."
+                      echo -n "Enter any value other than 0 to confirm SnapCenter server uninstallation (Default 0): " >&3
+                      read INPUT_FORMAT_DCONFIRM
+                      CONFIRM=${INPUT_FORMAT_DCONFIRM:-$CONFIRM}
+                      echo -e "\n"
+              else
+                      #Parsing the input values and storing it in a variable.
+                      logit ""
+                      logit "parseArguments: Begin the parsing of user provided arguments."
+                      for userinput in "$@"
+                      do
+                              logit "parseArguments arguments: $userinput"
+                              #DCONFIRM
+                              if [[ $userinput == "$INPUT_FORMAT_DCONFIRM"* ]]; then
+                                      CONFIRM=${userinput#$INPUT_FORMAT_DCONFIRM}
+                              fi
+                      done
+              fi
+      }
+      function prechecks() {
+              if [[ $CONFIRM -eq 0 ]]; then
+                      logit ""
+                      logit "*****************************************************"
+                      logit "Aborting the SnapCenter LINUX Server Uninstallation"
+                      logit "*****************************************************"
+                      logit ""
+                      exit 0;
+              fi
+              if [[ $USER != "root" ]]; then
+                      local SCRIPT_FULL_PATH=$(readlinkf "${BASH_SOURCE[0]}")
+                      logiterr "Insufficient privileges. Try re-run using $ sudo $SCRIPT_FULL_PATH"
+                      logit ""
+                      logit "*****************************************************"
+                      logit "Aborting the SnapCenter LINUX Server Uninstallation"
+                      logit "*****************************************************"
+                      logit ""
+                      exit 0;
+              fi
+      }
+      function readPropertiesFile()
+      {
+              #Check if it is HA config and get Active Node
+              $DOTNET $SNAPMANAGERWEB_DIR/BuildConfig/BuildConfig.dll $USER_INSTALL_DIR "true" "true"
+              logit "readPropertiesFile: Reading /var/opt/snapcenter/snapcenter_server.properties file."
+              local properties_file="/var/opt/snapcenter/snapcenter_server.properties"
+              # Check if the properties file exists
+              if [ -f "$properties_file" ]; then
+                      # Read each line from the properties file
+                      while IFS='=' read -r key value; do
+                              # Remove leading and trailing whitespace from key and value
+                              key=$(echo "$key" | xargs)
+                              value=$(echo "$value" | xargs)
+                              # Use a case statement to filter keys or perform transformations
+                              case "$key" in
+                                      HA_ACTIVE_NODE|HA_PASSIVE_NODE)
+                                              # If key is one we're looking for, export it to a variable
+                                              declare "$key=$value"
+                                              ;;
+                                      *)
+                                              # ignoring lines that do not match
+                                              ;;
+                              esac
+                      done < "$properties_file"
+              else
+                      logiterr "Properties file not found: $properties_file"
+                      Executing ${FUNCNAME[0]} $LINENO -1
+              fi
+              if [[ ! -z $HA_ACTIVE_NODE ]]; then
+                      if [[ $HA_ACTIVE_NODE == $IPADDR ]]; then
+                              MYSQL_HA_CONFIG=1
+                      else
+                              MYSQL_HA_CONFIG=2
+                      fi
+              fi
+              if [[ $MYSQL_HA_CONFIG == 2 ]]; then
+                      logit "HA Config detected. Proceeding with passive node uninstallation."
+              fi
+              if [[ $MYSQL_HA_CONFIG == 1 ]]; then
+                local installation_check=$(ssh "$HA_PASSIVE_NODE" "rpm -qa | grep netapp-smcore" )
+                if [[ ! -z $installation_check ]]; then
+                      logiterr "HA config detected. Please uninstall from passive node first."
+                      Executing ${FUNCNAME[0]} $LINENO -1
+                else
+                      logit "Passive node already unistalled. Proceeding with node 1 uninstallation."
+                fi
+              fi
+      }
+      #Generic RPM Uninstallation
+      function uninstallRpm() {
+              local rpmnames=$(rpm -q $@)
+              logit ""
+              logit "uninstallRpm: Uninstalling the sub-component: ($rpmnames)"
+              logit 'uninstallRpm: Executable Command: rpm -e' $rpmnames
+              rpm -e $rpmnames --nodeps
+              Executing ${FUNCNAME[0]} $LINENO $? warn
+              logit ""
+      }
+      function systemctlstop() {
+              logit "Stopping $1"
+              systemctl is-active --quiet $2
+          if [ $? -ne 0 ]
+          then
+             logit "$1 is not running."
+          else
+              logit "$1 stop is initiated and will complete soon. Please wait..."
+                  systemctl stop $2
+                      if [ $? -ne 0 ]
+                      then
+                              logit "ERROR: $1 stop encountered errors"
+                      else
+                              logit "$1 successfully terminated."
+                      fi
+              fi
+      }
+      function stopServices() {
+              systemctlstop "$SMCORE_APP_NAME" "$SMCORE_COMMAND"
+              systemctlstop "$SNAPMANAGER_WEBAPP_NAME" "$SNAPMANAGERWEB_COMMAND"
+              systemctlstop "$SCHEDULER_APP_NAME" "$SCHEDULER_COMMAND"
+      }
+      function unregisterServices() {
+          logit "unregisterServices: unregistering scheduler service in /etc/systemd/system"
+              /usr/bin/systemctl disable scheduler.service > /dev/null
+              rm -f /etc/systemd/system/scheduler.service
+              logit "unregisterServices: unregistering smcore service in /etc/systemd/system"
+              /usr/bin/systemctl disable smcore.service > /dev/null
+              rm -f /etc/systemd/system/smcore.service
+              logit "unregisterServices: unregistering snapmanagerweb service in /etc/systemd/system"
+              /usr/bin/systemctl disable snapmanagerweb.service > /dev/null
+              rm -f /etc/systemd/system/snapmanagerweb.service
+          /usr/bin/systemctl daemon-reload
+          /usr/bin/systemctl reset-failed
+          logit "unregisterServices: removal of snapcenter server services in /etc/systemd/system completed"
+      }
+      #Remove files
+      function removeFiles() {
+              logit ""
+          logit "removeFiles: Remove Files from the installation directory..."
+              #Remove the installation directory
+              rm -rf $SNAPMANAGERWEB_DIR
+              rm -rf $SCHEDULER_DIR
+              rm -rf $SMCORE_DIR
+              # Check if the directory is empty
+              if [ -d "$INSTALL_DIR" ] && [ -z "$(ls -A "$INSTALL_DIR")" ]; then
+                # It is empty, remove the directory
+                rmdir "$INSTALL_DIR"
+                echo "The directory '$INSTALL_DIR' was empty and has been deleted."
+              else
+                echo "The directory '$INSTALL_DIR' is not empty or does not exist."
+              fi
+      }
+      function uninstallRabbitMQ() {
+              uninstallRpm "rabbitmq-server" "erlang"
+              rm -rf /var/lib/rabbitmq/
+              rm -rf /etc/rabbitmq/
+              rm -rf /usr/lib64/erlang/
+              rm -rf /usr/local/lib/erlang/
+              logit "uninstallRabbitMQ: Uninstalled RabbitMQ and erlang."
+      }
+      function uninstallMySQL() {
+              uninstallRpm "mysql-community-icu-data-files" "mysql-community-common" "mysql-community-client" "mysql-community-client-plugins" "mysql-community-server" "mysql-community-libs"
+              rm -rf /var/lib/mysql*
+              logit "uninstallMySQL: MySQL uninstallation compeleted."
+      }
+      function uninstallPSModules() {
+              logit "uninstallPSModules: Removing PS module SnapCenter"
+              pwsh_path=$(readlinkf "$PWSH")
+              pwsh_path=$(dirname $pwsh_path)
+              local pwsh_modules_path=$pwsh_path/Modules/SnapCenter
+              rm -rf $pwsh_modules_path
+              logit "uninstallPSModules: PS module SnapCenter removed successfully"
+      }
+      function removeNginxConfiguration() {
+              logit "removeNginxConfiguration: Removing /etc/nginx/conf.d/snapcenter.conf"
+              rm -f /etc/nginx/conf.d/snapcenter.conf
+              rm -f /etc/nginx/certs/SCnginx*
+              rm -f /etc/nginx/certs/AuditLog*
+              nginx -s reload
+              logit "removeNginxConfiguration: nginx configuration removed"
+      }
+      ####################################################################
+      ###                         MAIN FUNCTION                        ###
+      ####################################################################
+      logit ""
+      logit "*****************************************************"
+      logit "Initiating the SnapCenter LINUX Server Uninstallation"
+      logit "*****************************************************"
+      logit ""
+      parseArguments $@
+      prechecks
+      constructMandatoryValues
+      readPropertiesFile
+      stopServices
+      unregisterServices
+      uninstallRpm $schedulerRPMName $smcoreRPMName $webappRPMName $snapgathersRPMName
+      uninstallRabbitMQ
+      uninstallMySQL
+      uninstallPSModules
+      removeNginxConfiguration
+      removeFiles
+      logit ""
+      logit "*****************************************************"
+      logit " Completed the SnapCenter LINUX Server Uninstallation"
+      logit "*****************************************************"
+      logit ""
+      ####################################################################
+      {% endraw %}
+    # --- FIN DE LA CORRECCIÓN DE SINTAXIS ---
+
+- name: "3. Ejecutar el desinstalador en modo silencioso"
+  ansible.builtin.shell:
+    cmd: "{{ snapcenter_uninstaller_path }} -i silent -DCONFIRM=1"
+  register: uninstall_result
+  changed_when: uninstall_result.rc == 0
+
+- name: "4. Mostrar la salida del desinstalador"
+  ansible.builtin.debug:
+    var: uninstall_result.stdout_lines
+  when: uninstall_result.stdout_lines | default([]) | length > 0
+
+- name: "5. Limpieza final: Eliminar el directorio de instalación residual"
+  ansible.builtin.file:
+    path: "{{ snapcenter_base_dir }}"
+    state: absent

@@ -1,0 +1,6 @@
+---
+# Tarea de limpieza del instalador temporal.
+- name: "Cleanup | Eliminar el archivo de instalación temporal"
+  ansible.builtin.file:
+    path: "{{ snapcenter_remote_tmp_path }}"
+    state: absent

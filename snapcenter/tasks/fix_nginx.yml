@@ -1,0 +1,211 @@
+---
+# ===================================================================
+# SOLUCIÓN COMPLETA: IPv6 NO SOPORTADO EN NGINX
+# ===================================================================
+# Problema: El kernel no soporta IPv6, pero Nginx intenta usar [::]:80
+# Se debe corregir AMBOS archivos:
+#   1. /etc/nginx/nginx.conf (puerto 80)
+#   2. /etc/nginx/conf.d/snapcenter.conf (puerto 8146) - YA CORREGIDO
+# ===================================================================
+
+- name: "Diagnóstico | Mostrar contenido de nginx.conf"
+  ansible.builtin.command: grep -n "listen" /etc/nginx/nginx.conf
+  register: nginx_main_listen
+  changed_when: false
+  failed_when: false
+
+- name: "Diagnóstico | Líneas 'listen' en nginx.conf"
+  ansible.builtin.debug:
+    var: nginx_main_listen.stdout_lines
+
+# ===================================================================
+# BACKUP DE ARCHIVOS DE CONFIGURACIÓN
+# ===================================================================
+- name: "Backup | Crear copia de nginx.conf"
+  ansible.builtin.copy:
+    src: /etc/nginx/nginx.conf
+    dest: /etc/nginx/nginx.conf.backup.{{ ansible_date_time.epoch }}
+    remote_src: yes
+    mode: '0644'
+
+- name: "Backup | Crear copia de snapcenter.conf"
+  ansible.builtin.copy:
+    src: /etc/nginx/conf.d/snapcenter.conf
+    dest: /etc/nginx/conf.d/snapcenter.conf.backup.{{ ansible_date_time.epoch }}
+    remote_src: yes
+    mode: '0644'
+  ignore_errors: true
+
+# ===================================================================
+# FIX 1: Comentar TODAS las líneas IPv6 en nginx.conf
+# ===================================================================
+- name: "Fix | Comentar todas las líneas 'listen' con IPv6 en nginx.conf"
+  ansible.builtin.replace:
+    path: /etc/nginx/nginx.conf
+    regexp: '^(\s*)(listen\s+\[::\]:.*)$'
+    replace: '\1#\2'
+  register: fix_main_ipv6
+
+- name: "Debug | IPv6 comentado en nginx.conf"
+  ansible.builtin.debug:
+    msg: "Cambios en nginx.conf: {{ fix_main_ipv6.changed }}"
+
+# ===================================================================
+# FIX 2: Comentar líneas IPv6 en snapcenter.conf (por si acaso)
+# ===================================================================
+- name: "Fix | Comentar IPv6 en snapcenter.conf"
+  ansible.builtin.replace:
+    path: /etc/nginx/conf.d/snapcenter.conf
+    regexp: '^(\s*)(listen\s+\[::\]:.*)$'
+    replace: '\1#\2'
+  register: fix_snapcenter_ipv6
+  ignore_errors: true
+
+- name: "Debug | IPv6 comentado en snapcenter.conf"
+  ansible.builtin.debug:
+    msg: "Cambios en snapcenter.conf: {{ fix_snapcenter_ipv6.changed }}"
+
+# ===================================================================
+# FIX 3: Eliminar líneas corruptas con ###listen
+# ===================================================================
+- name: "Fix | Eliminar líneas corruptas '###listen' en snapcenter.conf"
+  ansible.builtin.lineinfile:
+    path: /etc/nginx/conf.d/snapcenter.conf
+    regexp: '^###listen'
+    state: absent
+  register: fix_garbage
+  ignore_errors: true
+
+# ===================================================================
+# VERIFICACIÓN: Mostrar archivos modificados
+# ===================================================================
+- name: "Verificación | Mostrar nginx.conf modificado"
+  ansible.builtin.command: cat /etc/nginx/nginx.conf
+  register: modified_nginx_conf
+  changed_when: false
+  when: fix_main_ipv6.changed
+
+- name: "Verificación | nginx.conf modificado"
+  ansible.builtin.debug:
+    msg: "{{ modified_nginx_conf.stdout_lines }}"
+  when: fix_main_ipv6.changed
+
+- name: "Verificación | Mostrar snapcenter.conf final"
+  ansible.builtin.command: cat /etc/nginx/conf.d/snapcenter.conf
+  register: final_snapcenter_conf
+  changed_when: false
+
+- name: "Verificación | snapcenter.conf final"
+  ansible.builtin.debug:
+    msg: "{{ final_snapcenter_conf.stdout_lines }}"
+
+# ===================================================================
+# VALIDACIÓN: Comprobar sintaxis
+# ===================================================================
+- name: "Validación | Comprobar sintaxis de Nginx"
+  ansible.builtin.command: nginx -t
+  register: nginx_syntax
+  changed_when: false
+  failed_when: false
+
+- name: "Validación | Resultado de sintaxis"
+  ansible.builtin.debug:
+    msg:
+      - "Return Code: {{ nginx_syntax.rc }}"
+      - "STDERR: {{ nginx_syntax.stderr }}"
+
+- name: "Validación | Abortar si la sintaxis es incorrecta"
+  ansible.builtin.fail:
+    msg: |
+      ERROR: La configuración de Nginx sigue teniendo problemas
+      {{ nginx_syntax.stderr }}
+      
+      Revisa manualmente:
+        sudo grep -r "listen.*\[::\]" /etc/nginx/
+  when: nginx_syntax.rc != 0
+
+# ===================================================================
+# SELINUX: Configurar permisos
+# ===================================================================
+- name: "SELinux | Permitir conexiones de red"
+  ansible.posix.seboolean:
+    name: httpd_can_network_connect
+    state: yes
+    persistent: yes
+
+- name: "SELinux | Restaurar contexto de certificados"
+  ansible.builtin.command: restorecon -Rv /var/opt/snapcenter/certs
+  register: selinux_restore
+  changed_when: "'Relabeled' in selinux_restore.stdout"
+
+# ===================================================================
+# REINICIO: Aplicar cambios
+# ===================================================================
+- name: "Reinicio | Reiniciar servicio Nginx"
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted
+    enabled: yes
+  when: fix_main_ipv6.changed or fix_snapcenter_ipv6.changed
+
+- name: "Reinicio | Esperar 3 segundos"
+  ansible.builtin.pause:
+    seconds: 3
+
+# ===================================================================
+# VERIFICACIÓN FINAL
+# ===================================================================
+- name: "Verificación | Comprobar estado de Nginx"
+  ansible.builtin.systemd:
+    name: nginx
+  register: nginx_status
+
+- name: "Verificación | Estado del servicio"
+  ansible.builtin.debug:
+    msg:
+      - "Estado: {{ nginx_status.status.ActiveState }}"
+      - "Sub-Estado: {{ nginx_status.status.SubState }}"
+      - "PID: {{ nginx_status.status.MainPID }}"
+
+- name: "Verificación | Confirmar éxito"
+  ansible.builtin.assert:
+    that:
+      - nginx_status.status.ActiveState == "active"
+      - nginx_status.status.SubState == "running"
+    success_msg: |
+      EXITO: Nginx iniciado correctamente
+      - Estado: {{ nginx_status.status.ActiveState }}
+      - PID: {{ nginx_status.status.MainPID }}
+    fail_msg: |
+      FALLO: Nginx no pudo iniciar
+      
+      Diagnostica con:
+        sudo journalctl -xeu nginx.service --no-pager -n 50
+        sudo systemctl status nginx -l
+        sudo nginx -t
+        sudo grep -r "listen.*\[::\]" /etc/nginx/
+
+- name: "Verificación | Comprobar puerto 8146"
+  ansible.builtin.wait_for:
+    port: 8146
+    timeout: 10
+    state: started
+  ignore_errors: true
+  register: port_check
+
+- name: "Verificación | Estado del puerto"
+  ansible.builtin.debug:
+    msg: "Puerto 8146: {{ 'ACCESIBLE' if port_check is succeeded else 'NO ACCESIBLE' }}"
+
+# ===================================================================
+# VERIFICACIÓN ADICIONAL: Mostrar puertos en escucha
+# ===================================================================
+- name: "Verificación | Mostrar puertos en escucha"
+  ansible.builtin.command: ss -tlnp | grep nginx
+  register: listening_ports
+  changed_when: false
+  failed_when: false
+
+- name: "Verificación | Puertos de Nginx activos"
+  ansible.builtin.debug:
+    var: listening_ports.stdout_lines

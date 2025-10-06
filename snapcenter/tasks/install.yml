@@ -1,0 +1,91 @@
+---
+# Tareas de descarga y ejecución del instalador de SnapCenter.
+- name: "Install | Descargar el binario de instalación desde Artifactory"
+  ansible.builtin.get_url:
+    url: "https://{{ artifactory_host }}/artifactory/storage-snapcenter-pkgs-stable-local/{{ snapcenter_installer_binary }}"
+    dest: "{{ snapcenter_remote_tmp_path }}"
+    mode: '0755'
+    validate_certs: false
+
+- name: "Install | Ejecutar el instalador de SnapCenter con el umask temporal correcto"
+  ansible.builtin.shell: |
+    umask 0022
+    {{ snapcenter_remote_tmp_path }} \
+      -i silent \
+      -DWEBAPP_EXTERNAL_PORT={{ snapcenter_webapp_port }} \
+      -DSNAPCENTER_SERVER_USER={{ snapcenter_install_user }} \
+      -DUSER_INSTALL_DIR=/opt \
+      -DSELINUX=1
+  args:
+    creates: "{{ snapcenter_install_marker }}"
+  register: install_result
+  changed_when: install_result.rc == 0
+
+- name: "Fix | Comentar IPv6 en snapcenter.conf"
+  ansible.builtin.replace:
+    path: /etc/nginx/conf.d/snapcenter.conf
+    regexp: '^(\s*)(listen\s+\[::\]:.*)$'
+    replace: '\1#\2'
+  register: fix_snapcenter_ipv6
+  ignore_errors: true
+
+- name: "Debug | IPv6 comentado en snapcenter.conf"
+  ansible.builtin.debug:
+    msg: "Cambios en snapcenter.conf: {{ fix_snapcenter_ipv6.changed }}"
+# ===================================================================
+# REINICIO: Aplicar cambios
+# ===================================================================
+- name: "Reinicio | Reiniciar servicio Nginx"
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted
+    enabled: yes
+  when: fix_main_ipv6.changed or fix_snapcenter_ipv6.changed
+
+- name: "Reinicio | Esperar 3 segundos"
+  ansible.builtin.pause:
+    seconds: 3
+# ===================================================================
+# VERIFICACIÓN FINAL
+# ===================================================================
+- name: "Verificación | Comprobar estado de Nginx"
+  ansible.builtin.systemd:
+    name: nginx
+  register: nginx_status
+
+- name: "Verificación | Estado del servicio"
+  ansible.builtin.debug:
+    msg:
+      - "Estado: {{ nginx_status.status.ActiveState }}"
+      - "Sub-Estado: {{ nginx_status.status.SubState }}"
+      - "PID: {{ nginx_status.status.MainPID }}"
+
+- name: "Verificación | Confirmar éxito"
+  ansible.builtin.assert:
+    that:
+      - nginx_status.status.ActiveState == "active"
+      - nginx_status.status.SubState == "running"
+    success_msg: |
+      EXITO: Nginx iniciado correctamente
+      - Estado: {{ nginx_status.status.ActiveState }}
+      - PID: {{ nginx_status.status.MainPID }}
+    fail_msg: |
+      FALLO: Nginx no pudo iniciar
+      
+      Diagnostica con:
+        sudo journalctl -xeu nginx.service --no-pager -n 50
+        sudo systemctl status nginx -l
+        sudo nginx -t
+        sudo grep -r "listen.*\[::\]" /etc/nginx/
+
+- name: "Verificación | Comprobar puerto 8146"
+  ansible.builtin.wait_for:
+    port: 8146
+    timeout: 10
+    state: started
+  ignore_errors: true
+  register: port_check
+
+- name: "Verificación | Estado del puerto"
+  ansible.builtin.debug:
+    msg: "Puerto 8146: {{ 'ACCESIBLE' if port_check is succeeded else 'NO ACCESIBLE' }}"

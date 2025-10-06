@@ -1,0 +1,15 @@
+---
+# ===================================================================
+# PLAYBOOK PRINCIPAL PARA EL DESPLIEGUE DE NETAPP SNAPCENTER
+#
+# Orquesta la ejecución del rol 'snapcenter' para instalar y
+# configurar la aplicación.
+# ===================================================================
+- name: Desplegar y Configurar NetApp SnapCenter Server
+  hosts: all # Grupo definido en el fichero de inventario
+  become: true
+  remote_user: jenkins
+  gather_facts: true
+
+  roles:
+    - snapcenter

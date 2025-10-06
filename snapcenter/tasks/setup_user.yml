@@ -1,0 +1,34 @@
+---
+# ===================================================================
+# TAREAS: CREACIÓN DE USUARIO Y GRUPO PARA SNAPCENTER (VERSIÓN FINAL)
+# ===================================================================
+
+- name: "Comprobar si el grupo '{{ group_snapcenter }}' ya existe en la base de datos"
+  ansible.builtin.getent:
+    database: group
+    key: "{{ group_snapcenter }}"
+    fail_key: false
+  register: exist_snapcenter_group
+
+- name: "Crear el grupo '{{ group_snapcenter }}' si no existe"
+  ansible.builtin.group:
+    name: "{{ group_snapcenter }}"
+    state: present
+  when: exist_snapcenter_group.ansible_facts.getent_group[group_snapcenter] is none
+
+- name: "Comprobar si el usuario '{{ user_snapcenter }}' ya existe en la base de datos"
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ user_snapcenter }}"
+    fail_key: false
+  register: exist_snapcenter_user
+
+- name: "Crear el usuario '{{ user_snapcenter }}' y añadirlo a su grupo principal"
+  ansible.builtin.user:
+    name: "{{ user_snapcenter }}"
+    comment: "SnapCenter user account"
+    shell: /sbin/nologin
+    home: "{{ snapcenter_home }}"
+    group: "{{ group_snapcenter }}"
+    state: present
+  when: exist_snapcenter_user.ansible_facts.getent_passwd[user_snapcenter] is none
